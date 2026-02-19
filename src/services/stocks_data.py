@@ -51,11 +51,12 @@ class RequestAPI:
                 return []
         except Exception as e:
             print(f"Request failed: {e}")
+            return []
 
 
 
-
-async def get_symbol_data(symbol: str, start_date='2016-01-01', end_date=Config.today):
+async def get_symbol_data(symbol: str, start_date='2013-01-01', end_date='2026-02-19'):
+    file_path = os.path.join(Config.save_dir, f"{symbol}.csv")
     loop = asyncio.get_running_loop()
     
     def fetch_history():
@@ -65,24 +66,45 @@ async def get_symbol_data(symbol: str, start_date='2016-01-01', end_date=Config.
         df = quote.history(start=start_date, end=end_date)
         
         # Save to CSV
-        file_path = os.path.join(Config.save_dir, f"{symbol}.csv")
         df.to_csv(file_path, index=False)
         print(f"Saved {symbol} data to {file_path}")
-        
         return df
         
     return await loop.run_in_executor(None, fetch_history)
 
 async def get_data(tickers: list):
-    tasks = []
-    for symbol in tickers:
-        tasks.append(get_symbol_data(symbol))
+    # Lấy danh sách các ticker đã có file csv
+    existing_files = os.listdir(Config.save_dir)
+    existing_tickers = {f.replace('.csv', '') for f in existing_files if f.endswith('.csv')}
     
-    # Execute all tasks concurrently
-    results = await asyncio.gather(*tasks)
-    return results
+    # Lọc danh sách chỉ tải những ticker chưa có
+    tickers_to_download = [t for t in tickers if t not in existing_tickers]
+    
+    if not tickers_to_download:
+        print("Tất cả dữ liệu đã tồn tại. Không có gì để tải thêm.")
+        return []
+
+    print(f"Tổng số ticker cần tải thêm: {len(tickers_to_download)}/{len(tickers)}")
+    
+    chunk_size = 60
+    all_results = []
+    
+    for i in range(0, len(tickers_to_download), chunk_size):
+        chunk = tickers_to_download[i:i + chunk_size]
+        print(f"Processing chunk {i//chunk_size + 1}/{(len(tickers_to_download) + chunk_size - 1) // chunk_size} ({len(chunk)} tickers)...")
+        
+        tasks = [get_symbol_data(symbol) for symbol in chunk]
+        results = await asyncio.gather(*tasks)
+        all_results.extend(results)
+        
+        if i + chunk_size < len(tickers_to_download):
+            print("Đã chạy được 60 vòng, tạm dừng 1 phút để tránh giới hạn API...")
+            await asyncio.sleep(61)  # Sleep 61s to be safe
+            
+    return all_results
 
 if __name__ == "__main__":
     # Test the API request with random headers first
     api = RequestAPI()
-    api.request_tickers()
+    all_tickers = api.request_tickers()
+    asyncio.run(get_data(all_tickers))

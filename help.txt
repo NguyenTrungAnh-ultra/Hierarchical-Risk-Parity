@@ -1,0 +1,26 @@
+usage: python.exe -m vnstock_installer [-h] [-db] [-nu] [-c [CONFIG]]
+                                       [-bdo [BUILD_DIRECTORY_OVERRIDE]]
+                                       [-lang [LANGUAGE_CODE]]
+                                       [--logging-level [{DEBUG,INFO,WARNING,ERROR,CRITICAL}]]
+                                       [--base-url [BASE_URL]] [-v]
+
+Vnstock Installer - Professional GUI installer for Vnstock packages
+
+options:
+  -h, --help            show this help message and exit
+  -db, --default-browser
+                        use the default browser instead of Chrome/Edge
+  -nu, --no-ui          do not open a browser, only start the server (useful
+                        for debugging)
+  -c, --config [CONFIG]
+                        provide a JSON file containing UI configuration
+  -bdo, --build-directory-override [BUILD_DIRECTORY_OVERRIDE]
+                        a directory for build files (overrides the default)
+  -lang, --language [LANGUAGE_CODE]
+                        hint the language to use by default (vi=Vietnamese,
+                        en=English)
+  --logging-level [{DEBUG,INFO,WARNING,ERROR,CRITICAL}]
+                        the level to use for logging - defaults to INFO
+  --base-url [BASE_URL]
+                        Vnstock API base URL (default: https://vnstocks.com)
+  -v, --version         show program's version number and exit
