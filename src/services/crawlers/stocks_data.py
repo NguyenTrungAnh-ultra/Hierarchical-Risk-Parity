@@ -5,6 +5,8 @@ import os
 from datetime import datetime
 import requests
 from vnstock.core.utils.user_agent import get_headers
+from ..core.config import project_root
+
 
 
 class Config:
@@ -107,4 +109,4 @@ if __name__ == "__main__":
     # Test the API request with random headers first
     api = RequestAPI()
     all_tickers = api.request_tickers()
-    asyncio.run(get_data(all_tickers))
+    # asyncio.run(get_data(all_tickers))
