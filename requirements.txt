@@ -3,3 +3,5 @@ pandas
 vnstock
 scipy
 pytz
+playwright
+beautifulsoup4
