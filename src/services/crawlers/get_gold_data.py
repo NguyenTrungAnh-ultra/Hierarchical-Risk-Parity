@@ -4,6 +4,7 @@ import asyncio
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
+import random
 
 # Hàm chuyển đổi thời gian với nhiều định dạng
 def convert_to_datetime(time_str):
@@ -23,7 +24,9 @@ def convert_to_datetime(time_str):
 start_date = datetime(2016, 1, 1)
 end_date = datetime(2026, 2, 22)
 
-csv_file = '/Users/nguyentrunganhonichan/Documents/Hierarchical-Risk-Parity/datasets/gold/sjc.csv'
+# Tự động xác định đường dẫn tương đối từ vị trí file script
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+csv_file = os.path.join(project_root, 'datasets', 'gold', 'sjc.csv')
 
 async def fetch_day(context, date, semaphore, df_list):
     day = date.strftime('%d')
@@ -33,11 +36,13 @@ async def fetch_day(context, date, semaphore, df_list):
 
     async with semaphore:
         try:
+            # Random delay 1-3s để tránh bị block do request quá đều và nhanh
+            await asyncio.sleep(random.uniform(1.0, 3.0))
             page = await context.new_page()
             # Chặn tải hình ảnh, css, font để tăng tốc
             await page.route("**/*", lambda route: route.continue_() if route.request.resource_type in ["document", "script", "fetch", "xhr"] else route.abort())
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(500) # Tuỳ chỉnh thời gian chờ js load
+            await page.wait_for_timeout(random.randint(1000, 2000)) # Tuỳ chỉnh thời gian chờ js load ngẫu nhiên 1-2s
             html = await page.content()
             await page.close()
         except Exception as e:
@@ -50,53 +55,78 @@ async def fetch_day(context, date, semaphore, df_list):
             
     try:
         soup = BeautifulSoup(html, 'html.parser')
-        tables = soup.find_all('table', class_='w-full border-collapse border border-gray-400 font-sans')
         
-        if not tables:
-            print(f"Không có dữ liệu ngày {day}-{month}-{year}")
+        # Tìm bảng có chứa thẻ th 'Lịch sử giá vàng TPHCM'
+        target_table = None
+        for th in soup.find_all('th'):
+            if "Lịch sử giá vàng TPHCM" in th.get_text(strip=True):
+                target_table = th.find_parent('table')
+                break
+                
+        if not target_table:
+            print(f"Không tìm thấy bảng dữ liệu 'Lịch sử giá vàng TPHCM' ngày {day}-{month}-{year}")
+            return
+            
+        tbody = target_table.find('tbody')
+        if not tbody:
+            print(f"Không có dữ liệu (tbody) ngày {day}-{month}-{year}")
             return
 
-        soup_table = BeautifulSoup(str(tables[0]), 'html.parser')
-        cells = soup_table.find_all('td', class_='text-center align-middle border border-gray-400 text-[14px] h-[20px] leading-[40px]')
-        data = [cell.text.strip() for cell in cells]
-    except Exception as e:
-        print(f"Lỗi phân tích HTML {day}-{month}-{year}: {e}")
-        return
-
-    rows = []
-    current_type = None
-    i = 0
-
-    while i < len(data):
-        if data[i] in ['PNJ', 'SJC']:
-            current_type = data[i]
-            i += 1
-        else:
-            if i + 2 < len(data):
-                try:
-                    bid = float(data[i])  # Giá mua
-                    ask = float(data[i + 1])  # Giá bán
-                    timestamp = data[i + 2]  # Thời gian
-                    
-                    if current_type == 'SJC':
+        rows = []
+        current_gold_type_group = None
+        
+        for tr in tbody.find_all('tr'):
+            tds = tr.find_all('td')
+            if not tds:
+                continue
+                
+            # Bỏ qua dòng tiêu đề "Loại vàng" bên trong khối dữ liệu
+            if tds[0].text.strip() == "Loại vàng":
+                continue
+                
+            if tds[0].has_attr('rowspan'):
+                current_gold_type_group = tds[0].text.strip()
+                gold_type = current_gold_type_group
+                bid_idx = 1
+                ask_idx = 2
+            else:
+                gold_type = current_gold_type_group
+                bid_idx = 0
+                ask_idx = 1
+                
+            if len(tds) > ask_idx:
+                if gold_type == "SJC":
+                    try:
+                        # Thay thế dấu chấm và phẩy để lấy ra số đúng (ví dụ 168.500 -> 168500)
+                        bid_str = tds[bid_idx].text.strip().replace('.', '').replace(',', '')
+                        ask_str = tds[ask_idx].text.strip().replace('.', '').replace(',', '')
+                        
+                        bid = float(bid_str)
+                        ask = float(ask_str)
+                        
+                        # Fix cứng timestamp vào lúc 23:59:59 của ngày cào
+                        timestamp = date.strftime('%Y-%m-%d 23:59:59')
+                        
                         rows.append({
-                            'Loại vàng': current_type,
+                            'Loại vàng': gold_type,
                             'Giá mua': bid,
                             'Giá bán': ask,
                             'Thời gian cập nhật': timestamp
                         })
-                    i += 3
-                except ValueError:
-                    i += 1
-            else:
-                i += 1
+                    except ValueError:
+                        pass
+    except Exception as e:
+        print(f"Lỗi phân tích HTML {day}-{month}-{year}: {e}")
+        return
 
     if rows:
-        new_df = pd.DataFrame(rows)
+        # Nhóm SJC sẽ trả về nhiều rows trong ngày đó
+        # T lấy giá của hàng cuối cùng tương ứng mức giá chốt cuối phiên
+        last_sjc_row = rows[-1]
+        
+        new_df = pd.DataFrame([last_sjc_row])
         try:
             new_df['Thời gian cập nhật'] = new_df['Thời gian cập nhật'].apply(convert_to_datetime)
-            latest_idx = new_df['Thời gian cập nhật'].idxmax() # Lấy cuối phiên
-            new_df = new_df.loc[[latest_idx]]
             
             df_list.append(new_df)
             print(f"Thành công: {day}-{month}-{year}")
@@ -131,13 +161,24 @@ async def main():
 
     print(f"Cần cào {len(dates)} ngày...")
     
-    # Số luồng (tabs) đồng thời: để 10-15 để không bị trang web chặn quá nhiều request
-    semaphore = asyncio.Semaphore(15) 
+    # Lấy danh sách các User-Agent phổ biến
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0"
+    ]
+    
+    # Số luồng (tabs) đồng thời: giảm xuống 3-5 để tránh bị block IP chặn request
+    semaphore = asyncio.Semaphore(10) 
     df_list = []
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage'])
-        context = await browser.new_context()
+        browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'])
+        context = await browser.new_context(
+            user_agent=random.choice(user_agents),
+            viewport={'width': 1920, 'height': 1080}
+        )
         
         # Chia nhỏ ra từng khoảng 30 ngày để nếu có lỗi cũng không mất hết công sức
         chunk_size = 30
@@ -152,12 +193,9 @@ async def main():
                 df_main = pd.concat([df_main] + df_list, ignore_index=True)
                 df_main = df_main.drop_duplicates(subset=['Thời gian cập nhật'])
                 
-                # Tính lại giá trung bình
+                # Không tính giá trung bình, chỉ giữ giá đóng (giá bán cuối phiên)
                 if 'Giá trung bình bán' in df_main.columns:
                     df_main = df_main.drop(columns=['Giá trung bình bán'])
-                avg_price = df_main.groupby('Loại vàng')['Giá bán'].mean().reset_index()
-                avg_price = avg_price.rename(columns={'Giá bán': 'Giá trung bình bán'})
-                df_main = df_main.merge(avg_price, on='Loại vàng')
                 
                 df_main = df_main.sort_values('Thời gian cập nhật')
                 df_main.to_csv(csv_file, index=False, encoding='utf-8')

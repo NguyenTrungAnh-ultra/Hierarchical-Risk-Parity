@@ -5,15 +5,13 @@ import os
 from datetime import datetime
 import requests
 from vnstock.core.utils.user_agent import get_headers
-from ..core.config import project_root
-
 
 
 class Config:
     today = datetime.now().strftime('%Y-%m-%d')
 
     # Get the absolute path to the project root (root/datasets/stocks)
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     save_dir = os.path.join(project_root, 'datasets', 'stocks')
     os.makedirs(save_dir, exist_ok=True)
 
@@ -107,6 +105,6 @@ async def get_data(tickers: list):
 
 if __name__ == "__main__":
     # Test the API request with random headers first
-    api = RequestAPI()
-    all_tickers = api.request_tickers()
-    # asyncio.run(get_data(all_tickers))
+    # api = RequestAPI()
+    # all_tickers = api.request_tickers()
+    asyncio.run(get_data(['VNINDEX']))
