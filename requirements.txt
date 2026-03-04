@@ -5,3 +5,5 @@ scipy
 pytz
 playwright
 beautifulsoup4
+joblib
+scikit-learn
