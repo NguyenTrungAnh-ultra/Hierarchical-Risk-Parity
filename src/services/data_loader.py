@@ -1,15 +1,21 @@
 from typing import Dict
 import pandas as pd
-import os
 import sys
-# Thêm thư mục 'src' vào sys.path để chạy trực tiếp
+import os
+
+# Thêm thư mục gốc dự án vào sys.path để chạy trực tiếp tìm được `core` và `src`
 current_dir = os.path.dirname(os.path.abspath(__file__))
-# data_loader.py nằm ở src/services/, cần lên 1 cấp để về src
-src_path = os.path.abspath(os.path.join(current_dir, '..'))
+# data_loader.py nằm ở src/services/, lên 2 cấp để về thư mục gốc
+project_root = os.path.abspath(os.path.join(current_dir, '..', '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+    
+src_path = os.path.join(project_root, 'src')
 if src_path not in sys.path:
-    sys.path.append(src_path)
+    sys.path.insert(0, src_path)
+
 from concurrent.futures import ThreadPoolExecutor
-from core.config import stocks_data_path
+from src.utils.config import stocks_data_path
 
 def read_parallel(files)->Dict:
     """

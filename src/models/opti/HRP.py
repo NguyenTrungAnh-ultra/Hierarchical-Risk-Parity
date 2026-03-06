@@ -12,9 +12,9 @@ import numpy as np
 import scipy.cluster.hierarchy as sch
 import matplotlib.pyplot as plt
 
-from core.config import project_root, stocks_data_path
+from utils.config import project_root, stocks_data_path
 from services.data_loader import load_stocks
-from core.math_engines import log_return
+from utils.math_engines import log_return
 
 class HRP:
     def __init__(self):

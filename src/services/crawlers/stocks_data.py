@@ -58,6 +58,26 @@ async def get_symbol_data(symbol: str, start_date='2013-01-01', end_date=Config.
     file_path = os.path.join(Config.save_dir, f"{symbol}.csv")
     loop = asyncio.get_running_loop()
     
+    # Identify if we are updating an existing file
+    existing_df = None
+    if os.path.exists(file_path):
+        try:
+            existing_df = pd.read_csv(file_path)
+            if not existing_df.empty and 'time' in existing_df.columns:
+                # Use the last timestamp to determine the new start date
+                last_time = pd.to_datetime(existing_df['time']).max()
+                # vnstock's start_date is YYYY-MM-DD.
+                start_date = last_time.strftime('%Y-%m-%d')
+                
+                # Kiểm tra nếu dữ liệu đã lấy đến cuối phiên của ngày kết thúc (14:45 trở đi)
+                if start_date >= end_date and last_time.hour >= 14 and last_time.minute >= 45:
+                    print(f"{symbol} đã cập nhật dữ liệu mới nhất (đến {last_time}). Bỏ qua tải.")
+                    return existing_df
+                
+                print(f"Updating {symbol} from {start_date}...")
+        except Exception as e:
+            print(f"Error reading existing file for {symbol}: {e}")
+
     def fetch_history():
         try:
             # Initialize Quote object
@@ -65,43 +85,50 @@ async def get_symbol_data(symbol: str, start_date='2013-01-01', end_date=Config.
             # Fetch history data
             df = quote.history(start=start_date, end=end_date, interval='1m')
             
-            # Save to CSV
-            df.to_csv(file_path, index=False)
-            print(f"Saved {symbol} data to {file_path}")
-            return df
+            if not df.empty:
+                if existing_df is not None and not existing_df.empty:
+                    # Merge logic
+                    # Ensure both have 'time' as datetime for consistent merging
+                    df['time'] = pd.to_datetime(df['time'])
+                    local_existing = existing_df.copy()
+                    local_existing['time'] = pd.to_datetime(local_existing['time'])
+                    
+                    # Combine
+                    combined = pd.concat([local_existing, df])
+                    # Remove duplicates based on 'time'
+                    combined = combined.drop_duplicates(subset=['time'], keep='last').sort_values('time')
+                    df = combined
+                
+                # Save to CSV
+                df.to_csv(file_path, index=False)
+                print(f"Saved/Updated {symbol} data to {file_path}")
+                return df
+            else:
+                print(f"No new data for {symbol} in the requested period.")
+                return existing_df if existing_df is not None else pd.DataFrame()
         except Exception as e:
             print(f"Lỗi khi tải dữ liệu cho {symbol}: {e}")
-            return pd.DataFrame()
+            return existing_df if existing_df is not None else pd.DataFrame()
         
     return await loop.run_in_executor(None, fetch_history)
 
 async def get_data(tickers: list):
-    # Lấy danh sách các ticker đã có file csv
-    existing_files = os.listdir(Config.save_dir)
-    existing_tickers = {f.replace('.csv', '') for f in existing_files if f.endswith('.csv')}
+    # Now we process all tickers provided, checking if they need updates
+    print(f"Tổng số ticker cần kiểm tra: {len(tickers)}")
     
-    # Lọc danh sách chỉ tải những ticker chưa có
-    tickers_to_download = [t for t in tickers if t not in existing_tickers]
-    
-    if not tickers_to_download:
-        print("Tất cả dữ liệu đã tồn tại. Không có gì để tải thêm.")
-        return []
-
-    print(f"Tổng số ticker cần tải thêm: {len(tickers_to_download)}/{len(tickers)}")
-    
-    chunk_size = 60
+    chunk_size = 40
     all_results = []
     
-    for i in range(0, len(tickers_to_download), chunk_size):
-        chunk = tickers_to_download[i:i + chunk_size]
-        print(f"Processing chunk {i//chunk_size + 1}/{(len(tickers_to_download) + chunk_size - 1) // chunk_size} ({len(chunk)} tickers)...")
+    for i in range(0, len(tickers), chunk_size):    
+        chunk = tickers[i:i + chunk_size]
+        print(f"Processing chunk {i//chunk_size + 1}/{(len(tickers) + chunk_size - 1) // chunk_size} ({len(chunk)} tickers)...")
         
         tasks = [get_symbol_data(symbol) for symbol in chunk]
         results = await asyncio.gather(*tasks)
         all_results.extend(results)
         
-        if i + chunk_size < len(tickers_to_download):
-            print("Đã chạy được 60 vòng, tạm dừng 1 phút để tránh giới hạn API...")
+        if i + chunk_size < len(tickers):
+            print(f"Đã chạy được {chunk_size} vòng, tạm dừng 1 phút để tránh giới hạn API...")
             await asyncio.sleep(61)  # Sleep 61s to be safe
             
     return all_results
