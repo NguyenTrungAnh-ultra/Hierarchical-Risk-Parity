@@ -1,10 +1,7 @@
 import pandas as pd
 import numpy as np
 from numpy import int64
-import scipy.stats as stats
-import seaborn as sns
-import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
+from datetime import timedelta
 import os
 import sys
 # Lấy thư mục hiện hành của Jupyter Notebook
@@ -14,7 +11,7 @@ project_root = os.path.abspath(os.path.join(current_dir, '..', '..', '..'))
 # Thêm thư mục project_root vào sys.path để có thể Import các module từ src
 if project_root not in sys.path:
     sys.path.append(project_root)
-
+from src.utils import math_engines
 
 class TimeBar:
     @staticmethod
@@ -154,7 +151,9 @@ class DollarBar:
             
         return dollar_bars_df
     
-    def imbalance(series: pd.Series) -> pd.Series:
+    def imbalance(df: pd.DataFrame,
+                    initial_T_guess, 
+                    span=3) -> pd.Series:
         def TIBs(series):
             """
             Động cơ tính toán Quy tắc Tick (Tick Rule) siêu tốc bằng Vectorization.
@@ -178,7 +177,65 @@ class DollarBar:
             
             print("Hoàn tất phân loại Mua/Bán chủ động.")
             return b_t
+        
+        df['typical_price'] = math_engines.dollar_value(df)
+        df['b_t'] = TIBs(df.typical_price)
+        df.dropna(inplace=True)
+
+        def cal_threshold(df_warmup, initial_T_guess, span=3):
+            print("Khởi động Động cơ Ngưỡng Kỳ vọng (RHS)...")
+            # 1. Tính toán Hệ số Suy giảm (Alpha) từ siêu tham số Span
+            self.alpha = 2.0 / (span + 1)
+            
+            # 2. Giai đoạn Mồi (Warm-up Phase): Tính E0[b_t * v_t] ban đầu
+            tick_imbalance_array = (df_warmup['b_t'] * df_warmup['dola_value']).dropna().values
+            
+            if len(tick_imbalance_array) == 0:
+                raise ValueError("Dữ liệu Warm-up trống hoặc không hợp lệ!")
                 
+            # Tính trung bình tĩnh của toàn bộ giai đoạn mồi làm giá trị khởi thủy
+            self.expected_b_v = np.mean(tick_imbalance_array)
+            
+            # 3. Khởi tạo E0[T] (Kỳ vọng số lượng Tick ban đầu)
+            # giá trị này là: trung bình 1 Dollar Bar có bao nhiêu tick
+            self.expected_T = initial_T_guess
+            
+            # 4. Chốt Vế Phải (Ngưỡng Threshold) cho Thanh Số 1
+            self.current_threshold = self._compute_target_threshold()
+            
+            print(f"  + Alpha (Tốc độ quên): {self.alpha:.4f}")
+            print(f"  + E0[T] khởi thủy: {self.expected_T} ticks")
+            print(f"  + E0[b_t * v_t] khởi thủy: {self.expected_b_v:.2f} USD")
+            print(f"  => Ngưỡng Bar 1 (Vế Phải): {self.current_threshold:.2f} USD\n")
+
+        def _compute_target_threshold(self):
+            """
+            Toán học Vế Phải: E0[T] * |E0[b_t * v_t]|
+            """
+            # Lưu ý: Chúng ta lấy trị tuyệt đối của expected_b_v theo đúng chuẩn MLFinLab
+            return self.expected_T * np.abs(self.expected_b_v)
+
+        def update_threshold(self, actual_T, actual_tick_imbalance_array):
+            """
+            Hàm này CHỈ ĐƯỢC GỌI khi một thanh vừa ĐÓNG LẠI.
+            Nó nhận Cú sốc Thông tin Mới (theta_t) để cập nhật EWMA.
+            """
+            # 1. Cập nhật E0[T] bằng Incremental EWMA
+            # Công thức: Alpha * T_thực_tế + (1 - Alpha) * E0[T]_cũ
+            self.expected_T = (self.alpha * actual_T) + ((1 - self.alpha) * self.expected_T)
+            
+            # 2. Cập nhật E0[b_t * v_t] bằng Incremental EWMA
+            # Tính trung bình mức mất cân bằng của các tick bên trong thanh vừa đóng
+            actual_mean_b_v = np.mean(actual_tick_imbalance_array)
+            
+            # Áp dụng EWMA
+            self.expected_b_v = (self.alpha * actual_mean_b_v) + ((1 - self.alpha) * self.expected_b_v)
+            
+            # 3. Chốt Vế Phải (Ngưỡng Threshold) cho Thanh Tiếp theo
+            self.current_threshold = self._compute_target_threshold()
+            
+            return self.current_threshold
+
 
 
 if __name__ == '__main__':

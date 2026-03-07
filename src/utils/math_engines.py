@@ -66,3 +66,15 @@ def test_normality(bars_df, title="Dollar Bars Normality Test"):
     
     plt.tight_layout()
     plt.show()
+
+def dollar_value(df: pd.DataFrame):
+    """
+    Tính toán Dollar Value từ một DataFrame chứa OHLC.
+    Nếu có Volume, Dollar Value = Typical Price * Volume.
+    Nếu không có Volume, trả về tổng O+H+L+C như thiết kế nháp.
+    """    
+    if 'volume' in df.columns:
+        typical_price = (df['open'] + df['high'] + df['low'] + df['close']) / 4.0
+        return typical_price * df['volume']
+    if 'open' not in df.columns or 'close' not in df.columns:
+        raise ValueError("DataFrame yêu cầu phải có các cột 'open', 'high', 'low', 'close', 'volume.")
