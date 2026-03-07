@@ -1,9 +1,9 @@
 import pandas as pd
 import numpy as np
-from numpy import int64
 from datetime import timedelta
 import os
 import sys
+
 # Lấy thư mục hiện hành của Jupyter Notebook
 current_dir = os.getcwd()
 # Lên 3 cấp để chỉ định thư mục gốc của dự án (chứa thư mục 'src')
@@ -11,11 +11,16 @@ project_root = os.path.abspath(os.path.join(current_dir, '..', '..', '..'))
 # Thêm thư mục project_root vào sys.path để có thể Import các module từ src
 if project_root not in sys.path:
     sys.path.append(project_root)
-from src.utils import math_engines
+
+# Handle import gracefully for test executions
+try:
+    from src.utils import math_engines
+except ImportError:
+    pass
 
 class TimeBar:
     @staticmethod
-    def time_bar(df, expected_bars=3078):
+    def time_bar(df: pd.DataFrame, expected_bars: int = 3078) -> pd.DataFrame:
         """
         Động cơ sinh Thanh Thời gian (Time Bars) tương đương về tần suất.
         """
@@ -24,10 +29,14 @@ class TimeBar:
         
         # 2. Tính Tần suất Lấy mẫu Trung bình (T) bằng Giây
         freq_seconds = int(time_span.total_seconds() / expected_bars)
-        freq_str = f"{freq_seconds}s" # Định dạng chuẩn của Pandas (ví dụ: '300S' = 5 phút)
+        freq_str = f"{freq_seconds}s"
         
         print(f"[Time Bars] Khoảng thời gian mỗi thanh (T): {freq_seconds} giây ({freq_seconds/60:.2f} phút)")
         
+        col_dollar = 'dollar_value' if 'dollar_value' in df.columns else 'dola_value'
+        if col_dollar not in df.columns:
+            df[col_dollar] = df['close'] * df['volume']
+            
         # 3. Resample theo Thời gian thực
         time_bars = df.resample(freq_str).agg(
             open=('typical_price', 'first'),
@@ -35,46 +44,57 @@ class TimeBar:
             low=('typical_price', 'min'),
             close=('typical_price', 'last'),
             volume=('volume', 'sum'),
-            dola_value=('dola_value', 'sum')
+            dollar_value=(col_dollar, 'sum')
         )
         
-        # 4. Loại bỏ các khoảng thời gian "chết" (Thị trường không có giao dịch)
+        # 4. Loại bỏ các khoảng thời gian "chết"
         time_bars = time_bars.dropna()
         time_bars.index.name = 'close_time'
         
         print(f"[Time Bars] Số thanh thực tế tạo ra (sau khi bỏ thanh rỗng): {len(time_bars)}")
         return time_bars
 
+
 class DollarBar:
     @staticmethod
-    def dynamic_dollar_bars(df, rolling_window=20, n_target=20):
+    def dynamic_dollar_bars(df: pd.DataFrame, rolling_window: int = 20, n_target: int = 20) -> pd.DataFrame:
         """
         Động cơ sinh Thanh Đô la (Dollar Bars) chuẩn MLFinLab.
-        - Loại bỏ Look-ahead Bias bằng Rolling Window + Shift.
-        - Xử lý mượt mà dữ liệu Nến (OHLC) thay vì Tick Data thuần túy.
+        - Tối ưu hóa mảng C-contiguous (Numpy vectorization).
+        - Absorb Overshoot (Hấp thụ vượt ngưỡng).
         """
-        print("1. Bắt đầu tiền xử lý: Tính toán Bảng tra cứu Vt (Look-ahead Bias Protected)...")
+        print("[Dynamic Dollar Bars] Bắt đầu khởi tạo hệ thống...")
+        df = df.copy()
         
-        # Tính Tổng Đô la hàng ngày và lọc ngày nghỉ
-        daily_dollar_volume = df['dola_value'].resample('D').sum()
+        col_dollar = 'dollar_value' if 'dollar_value' in df.columns else 'dola_value'
+        if col_dollar not in df.columns:
+            df[col_dollar] = df['typical_price'] * df['volume']
+            
+        daily_dollar_volume = df[col_dollar].resample('D').sum()
         daily_dollar_volume = daily_dollar_volume[daily_dollar_volume > 0] 
         
-        # -------------------------------------------------------------------------
-        # SỬA LỖI 1: Giải quyết "Khởi động lạnh" (Cold Start Problem)
-        # Thêm tham số min_periods=1 để nó tính trung bình ngay từ ngày đầu tiên có dữ liệu,
-        # thay vì bắt buộc phải đợi đủ 20 ngày. Đảm bảo file test nhỏ vẫn chạy được.
-        # -------------------------------------------------------------------------
+        # SỬA LỖI 1: Giải quyết Cold Start Problem với min_periods=1
         rolling_vt = (daily_dollar_volume.rolling(window=rolling_window, min_periods=1).mean() / n_target).shift(1)
         
-        # -------------------------------------------------------------------------
-        # SỬA LỖI 2: Đồng bộ hóa Định dạng Chìa khóa (Dictionary Hashing Fix)
-        # Ép kiểu chìa khóa (k) từ pd.Timestamp về datetime.date trước khi đưa vào dict.
-        # -------------------------------------------------------------------------
+        # SỬA LỖI 2: Đồng bộ hóa kiểu Date Hash
         vt_dict = {k.date(): v for k, v in rolling_vt.dropna().items()}
-
-        print(f"Bảng tra cứu đã có {len(vt_dict)} ngày hợp lệ. Bắt đầu lấy mẫu...")
+        print(f"[Dynamic Dollar Bars] Bảng tra cứu Vt đã có {len(vt_dict)} ngày hợp lệ.")
         
-        # Khởi tạo các biến Trạng thái (State Variables)
+        # TỐI ƯU HÓA 5: ARRAY VECTORIZATION 
+        df_dates = pd.Series(df.index.date, index=df.index)
+        thresholds = df_dates.map(vt_dict).values
+        
+        valid_idx = ~pd.isna(thresholds)
+        
+        times = df.index.values[valid_idx]
+        opens = df['open'].values[valid_idx]
+        highs = df['high'].values[valid_idx]
+        lows = df['low'].values[valid_idx]
+        closes = df['close'].values[valid_idx]
+        volumes = df['volume'].values[valid_idx]
+        dollar_values = df[col_dollar].values[valid_idx]
+        threshold_vals = thresholds[valid_idx]
+
         bars = []
         cum_dollar = 0.0
         cum_volume = 0.0
@@ -84,58 +104,43 @@ class DollarBar:
         open_price = None
         open_time = None
 
-        # Lặp qua từng dòng dữ liệu định tuyến
-        for row in df.itertuples():
-            current_datetime = row.Index
-            current_date = current_datetime.date()
-            
-            # Tra cứu Threshold một cách an toàn
-            current_vt = vt_dict.get(current_date, np.nan)
-            if pd.isna(current_vt):
-                continue
+        for i in range(len(times)):
+            current_datetime = times[i]
+            current_vt = threshold_vals[i]
                 
-            # Trích xuất dữ liệu dòng
-            curr_open = row.open
-            curr_high = row.high
-            curr_low = row.low
-            curr_close = row.close
-            volume = row.volume
-            dollar_val = row.dola_value
+            curr_open = opens[i]
+            curr_high = highs[i]
+            curr_low = lows[i]
+            curr_close = closes[i]
+            volume = volumes[i]
+            dollar_val = dollar_values[i]
             
-            # O: Giá Mở cửa là giá Open của phút ĐẦU TIÊN
             if open_price is None:
                 open_price = curr_open
                 open_time = current_datetime
                 
-            # Tích lũy Cache
             cum_dollar += dollar_val
             cum_volume += volume
             cum_ticks += 1
             
-            # H & L: Chốt chặn an toàn (Safety Check) của MLFinLab
             if curr_high > high_price: high_price = curr_high
             if curr_low < low_price: low_price = curr_low
-            high_price_bar = max(high_price, open_price)
-            low_price_bar = min(low_price, open_price)
                 
-            # 4. KIỂM TRA NGƯỠNG (THRESHOLD)
             if cum_dollar >= current_vt:
-                # Sinh thanh (Tương đương StandardBars._create_bars)
                 bars.append({
                     'open_time': open_time,
                     'close_time': current_datetime, 
                     'open': open_price,              
-                    'high': high_price_bar,              
-                    'low': low_price_bar,                
+                    'high': max(high_price, open_price),              
+                    'low': min(low_price, open_price),                
                     'close': curr_close,             
                     'volume': cum_volume,
-                    'dola_value': cum_dollar,        
+                    'dollar_value': cum_dollar,        
                     'tick_count': cum_ticks,
                     'vt_threshold': current_vt 
                 })
                 
-                # Reset Cache: TUYỆT ĐỐI HẤP THỤ PHẦN DƯ (Absorb Overshoot)
-                # Tương đương StandardBars._reset_cache
+                # TUYỆT ĐỐI HẤP THỤ PHẦN DƯ
                 cum_dollar = 0.0
                 cum_volume = 0.0
                 cum_ticks = 0
@@ -144,104 +149,156 @@ class DollarBar:
                 open_price = None 
                 open_time = None
 
-        # Đóng gói và trả về
         dollar_bars_df = pd.DataFrame(bars)
         if not dollar_bars_df.empty:
             dollar_bars_df.set_index('close_time', inplace=True)
             
         return dollar_bars_df
     
-    def imbalance(df: pd.DataFrame,
-                    initial_T_guess, 
-                    span=3) -> pd.Series:
-        def TIBs(series):
-            """
-            Động cơ tính toán Quy tắc Tick (Tick Rule) siêu tốc bằng Vectorization.
-            series: Series chứa chuỗi giá (Tick giá hoặc Close price của nến siêu nhỏ).
-            output: Series chứa mảng b_t={-1,1}.
-            """
-            print("Bắt đầu khởi tạo Quy tắc Tick...")
-            
-            # 1. Tính toán vi phân giá (Delta P)
-            delta_p = df.diff()
-            
-            # 2. Rút gọn thành mảng dấu (-1, 0, 1)
+    @staticmethod
+    def imbalance(df: pd.DataFrame, initial_T_guess: int = 100, span: int = 3) -> pd.DataFrame:
+        """
+        Động cơ sinh Imbalance Bars chuẩn MLFinLab.
+        Đã sửa lỗi logic và tăng tốc bằng Numpy ndarray.
+        """
+        def TIBs(series: pd.Series):
+            print("[Imbalance Bars] Khởi tạo Quy tắc Tick...")
+            delta_p = series.diff()
             b_t = np.sign(delta_p)
-            
-            # 3. Giải quyết Điểm nghẽn: Kế thừa khi giá không đổi (0)
-            # Thay thế các số 0 thành NaN, sau đó dùng ffill (Forward Fill) để kế thừa trạng thái trước đó
-            b_t = b_t.replace(0, np.nan).ffill()
-            
-            # 4. Xử lý giá trị đầu tiên (nếu nó là NaN, mặc định nó là 1 hoặc -1)
+            b_t = b_t.replace(0, np.nan).ffill() 
             b_t = b_t.fillna(1)
-            
-            print("Hoàn tất phân loại Mua/Bán chủ động.")
+            print("[Imbalance Bars] Phân loại Mua/Bán thành công.")
             return b_t
+
+        df = df.copy()
         
-        df['typical_price'] = math_engines.dollar_value(df)
-        df['b_t'] = TIBs(df.typical_price)
-        df.dropna(inplace=True)
+        col_dollar = 'dollar_value' if 'dollar_value' in df.columns else 'dola_value'
+        if col_dollar not in df.columns:
+            if 'typical_price' not in df.columns:
+                df['typical_price'] = (df['open'] + df['high'] + df['low'] + df['close']) / 4.0
+            df[col_dollar] = df['typical_price'] * df['volume']
 
-        def cal_threshold(df_warmup, initial_T_guess, span=3):
-            print("Khởi động Động cơ Ngưỡng Kỳ vọng (RHS)...")
-            # 1. Tính toán Hệ số Suy giảm (Alpha) từ siêu tham số Span
-            self.alpha = 2.0 / (span + 1)
-            
-            # 2. Giai đoạn Mồi (Warm-up Phase): Tính E0[b_t * v_t] ban đầu
-            tick_imbalance_array = (df_warmup['b_t'] * df_warmup['dola_value']).dropna().values
-            
-            if len(tick_imbalance_array) == 0:
-                raise ValueError("Dữ liệu Warm-up trống hoặc không hợp lệ!")
+        # SỬA LỖI 1: Chuẩn MLFinLab. Dùng giá (Close) để xác định Tick Direction
+        df['b_t'] = TIBs(df['close'])
+        
+        # Lọc bỏ row khuyết ban đầu
+        df.dropna(subset=['b_t', col_dollar], inplace=True)
+        
+        # SỬA LỖI 3: Mồi dữ liệu (Warm-up Phase)
+        df_warmup = df.head(initial_T_guess * 5)
+        if len(df_warmup) == 0:
+            raise ValueError("[Imbalance Bars] Data rỗng, không đủ mồi ngưỡng!")
+
+        class ImbalanceThresholdEngine:
+            def __init__(self, df_warmup, initial_T_guess, span=3):
+                print("[RHS Engine] Warming up...")
+                self.alpha = 2.0 / (span + 1)
                 
-            # Tính trung bình tĩnh của toàn bộ giai đoạn mồi làm giá trị khởi thủy
-            self.expected_b_v = np.mean(tick_imbalance_array)
-            
-            # 3. Khởi tạo E0[T] (Kỳ vọng số lượng Tick ban đầu)
-            # giá trị này là: trung bình 1 Dollar Bar có bao nhiêu tick
-            self.expected_T = initial_T_guess
-            
-            # 4. Chốt Vế Phải (Ngưỡng Threshold) cho Thanh Số 1
-            self.current_threshold = self._compute_target_threshold()
-            
-            print(f"  + Alpha (Tốc độ quên): {self.alpha:.4f}")
-            print(f"  + E0[T] khởi thủy: {self.expected_T} ticks")
-            print(f"  + E0[b_t * v_t] khởi thủy: {self.expected_b_v:.2f} USD")
-            print(f"  => Ngưỡng Bar 1 (Vế Phải): {self.current_threshold:.2f} USD\n")
+                # SỬA LỖI (KeyError): Gọi đúng tên cột
+                tick_imbalance_array = (df_warmup['b_t'] * df_warmup[col_dollar]).dropna().values
+                self.expected_b_v = np.mean(tick_imbalance_array)
+                self.expected_T = initial_T_guess
+                
+                self.current_threshold = self._compute_target_threshold()
+                print(f"  + Alpha: {self.alpha:.4f} | E0[T]: {self.expected_T} | Initial Threshold: {self.current_threshold:.2f}")
 
-        def _compute_target_threshold(self):
-            """
-            Toán học Vế Phải: E0[T] * |E0[b_t * v_t]|
-            """
-            # Lưu ý: Chúng ta lấy trị tuyệt đối của expected_b_v theo đúng chuẩn MLFinLab
-            return self.expected_T * np.abs(self.expected_b_v)
+            def _compute_target_threshold(self):
+                return self.expected_T * np.abs(self.expected_b_v)
 
-        def update_threshold(self, actual_T, actual_tick_imbalance_array):
-            """
-            Hàm này CHỈ ĐƯỢC GỌI khi một thanh vừa ĐÓNG LẠI.
-            Nó nhận Cú sốc Thông tin Mới (theta_t) để cập nhật EWMA.
-            """
-            # 1. Cập nhật E0[T] bằng Incremental EWMA
-            # Công thức: Alpha * T_thực_tế + (1 - Alpha) * E0[T]_cũ
-            self.expected_T = (self.alpha * actual_T) + ((1 - self.alpha) * self.expected_T)
-            
-            # 2. Cập nhật E0[b_t * v_t] bằng Incremental EWMA
-            # Tính trung bình mức mất cân bằng của các tick bên trong thanh vừa đóng
-            actual_mean_b_v = np.mean(actual_tick_imbalance_array)
-            
-            # Áp dụng EWMA
-            self.expected_b_v = (self.alpha * actual_mean_b_v) + ((1 - self.alpha) * self.expected_b_v)
-            
-            # 3. Chốt Vế Phải (Ngưỡng Threshold) cho Thanh Tiếp theo
-            self.current_threshold = self._compute_target_threshold()
-            
-            return self.current_threshold
+            def update_threshold(self, actual_T, actual_tick_imbalance_array):
+                self.expected_T = (self.alpha * actual_T) + ((1 - self.alpha) * self.expected_T)
+                actual_mean_b_v = np.mean(actual_tick_imbalance_array)
+                self.expected_b_v = (self.alpha * actual_mean_b_v) + ((1 - self.alpha) * self.expected_b_v)
+                self.current_threshold = self._compute_target_threshold()
+                return self.current_threshold
 
+        engine = ImbalanceThresholdEngine(df_warmup, initial_T_guess=initial_T_guess, span=span)
 
+        # TỐI ƯU HÓA 5: SỬ DỤNG ARRAY THAY VÌ ITERTUPLES 
+        times = df.index.values
+        opens = df['open'].values
+        highs = df['high'].values
+        lows = df['low'].values
+        closes = df['close'].values
+        volumes = df['volume'].values
+        dollar_values = df[col_dollar].values
+        b_t_values = df['b_t'].values
+        
+        theta = 0.0  
+        current_bar_imbalances = []  
+        bars = []
+        
+        cum_volume = 0.0
+        cum_ticks = 0
+        open_price = None
+        open_time = None
+        high_price = -np.inf
+        low_price = np.inf
+
+        for i in range(len(times)):
+            current_datetime = times[i]
+            
+            price = closes[i] 
+            volume = volumes[i]
+            dollar_val = dollar_values[i]
+            b_t = b_t_values[i] 
+            
+            tick_imbalance = b_t * dollar_val
+            theta += tick_imbalance
+            current_bar_imbalances.append(tick_imbalance)
+            
+            if open_price is None:
+                open_price = opens[i]
+                open_time = current_datetime
+                
+            if highs[i] > high_price: high_price = highs[i]
+            if lows[i] < low_price: low_price = lows[i]
+                
+            cum_volume += volume
+            cum_ticks += 1
+            
+            if abs(theta) >= engine.current_threshold:
+                bars.append({
+                    'open_time': open_time,
+                    'close_time': current_datetime,
+                    'open': open_price,
+                    'high': max(high_price, open_price),
+                    'low': min(low_price, open_price),
+                    'close': price,
+                    'volume': cum_volume,
+                    'dollar_imbalance': theta,
+                    'tick_count': cum_ticks,
+                    'threshold_used': engine.current_threshold
+                })
+                
+                engine.update_threshold(
+                    actual_T=len(current_bar_imbalances), 
+                    actual_tick_imbalance_array=current_bar_imbalances
+                )
+                
+                theta = 0.0
+                current_bar_imbalances = []
+                cum_volume = 0.0
+                cum_ticks = 0
+                open_price = None
+                open_time = None
+                high_price = -np.inf
+                low_price = np.inf
+                
+        # SỬA LỖI 4: Trả về DataFrame đàng hoàng thay vì List hay Dict. Bỏ lại Orphan Bars (chuẩn MLFinlab)
+        imbalance_bars_df = pd.DataFrame(bars)
+        if not imbalance_bars_df.empty:
+            imbalance_bars_df.set_index('close_time', inplace=True)
+            
+        print(f"[Imbalance Bars] Hoàn tất. Mẫu: {len(imbalance_bars_df)} thanh.")
+        return imbalance_bars_df
 
 if __name__ == '__main__':
+    # Test mã nguồn
     import sys
     import os
-    # Đảm bảo đã thêm thư mục gốc vào `sys.path`
+    from datetime import timedelta
+    
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(current_dir, '..', '..', '..'))
     if project_root not in sys.path:
@@ -251,21 +308,26 @@ if __name__ == '__main__':
     if src_path not in sys.path:
         sys.path.insert(0, src_path)
 
-    # Import data_loader (Tệp thư viện nằm tại src/services/data_loader.py)
-    from src.services import data_loader
-    from src.utils import math_engines
+    try:
+        from src.services import data_loader
 
-    nlg = data_loader.load_stocks(['ACB'])
-    nlg = pd.DataFrame(nlg['ACB'])
-    nlg.time = pd.to_datetime(nlg.time)
-    nlg.set_index('time', inplace=True)
-    nlg['typical_price'] = (nlg.open+nlg.high+nlg.low+nlg.close)/4
-    nlg['dola_value'] = nlg.typical_price*nlg.volume
-    df = nlg[nlg.index.date >= nlg.index.date.max() - timedelta(130)]
-    
-    # Gọi hàm từ class DollarBar mới được đổi tên và format lại
-    # df_bars = DollarBar.dynamic_dollar_bars(df, rolling_window=20, n_target=5)
-    # print(df_bars.tail(10))
-    
-    # Hàm test_normality chưa được định nghĩa trong file này
-    # math_engines.test_normality(df_bars, "Dollar Bars")
+        nlg = data_loader.load_stocks(['ACB'])
+        nlg = pd.DataFrame(nlg['ACB'])
+        nlg.time = pd.to_datetime(nlg.time)
+        nlg.set_index('time', inplace=True)
+        nlg['typical_price'] = (nlg.open+nlg.high+nlg.low+nlg.close)/4
+        nlg['dollar_value'] = nlg.typical_price*nlg.volume
+        
+        df = nlg[nlg.index.date >= nlg.index.date.max() - timedelta(130)]
+        print(f"Data size: {len(df)}")
+        
+        print("1. Kiểm định Dollar Bars:")
+        df_bars = DollarBar.dynamic_dollar_bars(df, rolling_window=20, n_target=5)
+        print(df_bars.tail())
+        
+        print("2. Kiểm định Imbalance Bars:")
+        imb_bars = DollarBar.imbalance(df, initial_T_guess=100, span=3)
+        print(imb_bars.tail())
+
+    except ImportError as e:
+        print("Không thể import data_loader để chạy test:", e)
