@@ -156,10 +156,11 @@ class DollarBar:
         return dollar_bars_df
     
     @staticmethod
-    def imbalance(df: pd.DataFrame, initial_T_guess: int = 100, span: int = 3) -> pd.DataFrame:
+    def imbalance(df: pd.DataFrame, initial_T_guess: int = 100, span: int = 100) -> pd.DataFrame:
         """
         Động cơ sinh Imbalance Bars chuẩn MLFinLab.
-        Đã sửa lỗi logic và tăng tốc bằng Numpy ndarray.
+        Khuyến cáo: nên để span=initial_T_guess
+        Lưu ý: kiểm tra floor
         """
         def TIBs(series: pd.Series):
             print("[Imbalance Bars] Khởi tạo Quy tắc Tick...")
@@ -196,20 +197,26 @@ class DollarBar:
                 
                 # SỬA LỖI (KeyError): Gọi đúng tên cột
                 tick_imbalance_array = (df_warmup['b_t'] * df_warmup[col_dollar]).dropna().values
-                self.expected_b_v = np.mean(tick_imbalance_array)
+                self.expected_b_v = np.mean(tick_imbalance_array)  # LUÔN GIỮ DẤU
                 self.expected_T = initial_T_guess
                 
-                self.current_threshold = self._compute_target_threshold()
-                print(f"  + Alpha: {self.alpha:.4f} | E0[T]: {self.expected_T} | Initial Threshold: {self.current_threshold:.2f}")
-
-            def _compute_target_threshold(self):
-                return self.expected_T * np.abs(self.expected_b_v)
-
-            def update_threshold(self, actual_T, actual_tick_imbalance_array):
+                # LƯU LẠI MỨC FLOOR
+                self.initial_threshold = self.expected_T * np.abs(self.expected_b_v)
+                self.current_threshold = self.initial_threshold
+                # Sàn = x0.1 hoặc một con số fixed ***********************************************************
+                self.floor = max(self.initial_threshold * 0.1, 100.0) 
+                
+            def update_threshold(self, actual_T, actual_tick_imbalance_array): # KHI UPDATE
                 self.expected_T = (self.alpha * actual_T) + ((1 - self.alpha) * self.expected_T)
+                
+                # LUÔN GIỮ DẤU cho expected_b_v
                 actual_mean_b_v = np.mean(actual_tick_imbalance_array)
                 self.expected_b_v = (self.alpha * actual_mean_b_v) + ((1 - self.alpha) * self.expected_b_v)
-                self.current_threshold = self._compute_target_threshold()
+                
+                # ÁP DỤNG NGƯỠNG FLOOR để chống Death spiral
+                raw_threshold = self.expected_T * np.abs(self.expected_b_v)
+                self.current_threshold = max(raw_threshold, self.floor)
+                
                 return self.current_threshold
 
         engine = ImbalanceThresholdEngine(df_warmup, initial_T_guess=initial_T_guess, span=span)
@@ -235,7 +242,7 @@ class DollarBar:
         high_price = -np.inf
         low_price = np.inf
 
-        for i in range(len(times)):
+        for i in range(len(df_warmup), len(times)):
             current_datetime = times[i]
             
             price = closes[i] 
@@ -294,40 +301,60 @@ class DollarBar:
         return imbalance_bars_df
 
 if __name__ == '__main__':
-    # Test mã nguồn
-    import sys
-    import os
-    from datetime import timedelta
+    print("=" * 60)
+    print("TESTING MLFINLAB BAR ENGINES WITH REAL DATA (FPT)")
+    print("=" * 60)
     
+    # 1. Load Real Data from datasets/stocks
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(current_dir, '..', '..', '..'))
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
+    fpt_path = os.path.join(project_root, 'datasets', 'stocks', 'FPT.csv')
     
-    src_path = os.path.join(project_root, 'src')
-    if src_path not in sys.path:
-        sys.path.insert(0, src_path)
-
     try:
-        from src.services import data_loader
+        df_test = pd.read_csv(fpt_path)
+        df_test['time'] = pd.to_datetime(df_test['time'])
+        df_test.set_index('time', inplace=True)
+        df_test.sort_index(inplace=True)
+        
+        # Calculate typical price and dollar value
+        df_test['typical_price'] = (df_test['open'] + df_test['high'] + df_test['low'] + df_test['close']) / 4.0
+        df_test['dollar_value'] = df_test['typical_price'] * df_test['volume']
+        
+        # For testing, let's take the last 6 months to make it run fast but meaningful
+        # (adjust this timedelta if you want to test on full history)
+        from datetime import timedelta
+        df_test = df_test[df_test.index.date >= df_test.index.date.max() - timedelta(days=180)]
+        print(f"[*] Đã tải {len(df_test)} dòng dữ liệu dòng dữ liệu FPT 1-phút (6 tháng qua).")
+        
+        # 2. Test Dynamic Dollar Bars
+        print("\n" + "-" * 60)
+        print("TEST 1: DYNAMIC DOLLAR BARS")
+        print("-" * 60)
+        df_bars = DollarBar.dynamic_dollar_bars(
+            df_test, 
+            rolling_window=20, 
+            n_target=10  # Target 10 bars per day
+        )
+        print(f"[*] Kết quả: Tạo thành công {len(df_bars)} Dynamic Dollar Bars.")
+        print(df_bars[['open', 'high', 'low', 'close', 'volume', 'dollar_value', 'tick_count']].head(5))
+        print("...")
+        print(df_bars[['open', 'high', 'low', 'close', 'volume', 'dollar_value', 'tick_count']].tail(3))
 
-        nlg = data_loader.load_stocks(['ACB'])
-        nlg = pd.DataFrame(nlg['ACB'])
-        nlg.time = pd.to_datetime(nlg.time)
-        nlg.set_index('time', inplace=True)
-        nlg['typical_price'] = (nlg.open+nlg.high+nlg.low+nlg.close)/4
-        nlg['dollar_value'] = nlg.typical_price*nlg.volume
+        # 3. Test Imbalance Bars
+        print("\n" + "-" * 60)
+        print("TEST 2: IMBALANCE BARS (MLFINLAB)")
+        print("-" * 60)
+        imb_bars = DollarBar.imbalance(
+            df_test, 
+            initial_T_guess=100, 
+            span=100
+        )
+        print(f"[*] Kết quả: Tạo thành công {len(imb_bars)} Imbalance Bars.")
+        print(imb_bars[['open', 'high', 'low', 'close', 'volume', 'dollar_imbalance', 'tick_count', 'threshold_used']].head(5))
+        print("...")
+        print(imb_bars[['open', 'high', 'low', 'close', 'volume', 'dollar_imbalance', 'tick_count', 'threshold_used']].tail(3))
         
-        df = nlg[nlg.index.date >= nlg.index.date.max() - timedelta(130)]
-        print(f"Data size: {len(df)}")
-        
-        print("1. Kiểm định Dollar Bars:")
-        df_bars = DollarBar.dynamic_dollar_bars(df, rolling_window=20, n_target=5)
-        print(df_bars.tail())
-        
-        print("2. Kiểm định Imbalance Bars:")
-        imb_bars = DollarBar.imbalance(df, initial_T_guess=100, span=3)
-        print(imb_bars.tail())
-
-    except ImportError as e:
-        print("Không thể import data_loader để chạy test:", e)
+    except FileNotFoundError:
+        print(f"[!] Không tìm thấy file tại: {fpt_path}")
+    except Exception as e:
+        print(f"[!] Lỗi khi chạy test FPT: {e}")
