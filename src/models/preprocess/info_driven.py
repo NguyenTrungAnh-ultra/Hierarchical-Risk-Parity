@@ -195,9 +195,15 @@ class DollarBar:
                 print("[RHS Engine] Warming up...")
                 self.alpha = 2.0 / (span + 1)
                 
-                # SỬA LỖI (KeyError): Gọi đúng tên cột
+                # Khởi tạo EWMA cho b_v bằng chuỗi quá khứ thay vì np.mean() cục bộ
                 tick_imbalance_array = (df_warmup['b_t'] * df_warmup[col_dollar]).dropna().values
-                self.expected_b_v = np.mean(tick_imbalance_array)  # LUÔN GIỮ DẤU
+                if len(tick_imbalance_array) > 0:
+                    self.expected_b_v = tick_imbalance_array[0]
+                    for x in tick_imbalance_array[1:]:
+                        self.expected_b_v = (self.alpha * x) + ((1 - self.alpha) * self.expected_b_v)
+                else:
+                    self.expected_b_v = 0.0
+                
                 self.expected_T = initial_T_guess
                 
                 # LƯU LẠI MỨC FLOOR
@@ -209,9 +215,9 @@ class DollarBar:
             def update_threshold(self, actual_T, actual_tick_imbalance_array): # KHI UPDATE
                 self.expected_T = (self.alpha * actual_T) + ((1 - self.alpha) * self.expected_T)
                 
-                # LUÔN GIỮ DẤU cho expected_b_v
-                actual_mean_b_v = np.mean(actual_tick_imbalance_array)
-                self.expected_b_v = (self.alpha * actual_mean_b_v) + ((1 - self.alpha) * self.expected_b_v)
+                # Cập nhật EWMA LUYẾN TUYẾN tick-by-tick bảo toàn decay
+                for x in actual_tick_imbalance_array:
+                    self.expected_b_v = (self.alpha * x) + ((1 - self.alpha) * self.expected_b_v)
                 
                 # ÁP DỤNG NGƯỠNG FLOOR để chống Death spiral
                 raw_threshold = self.expected_T * np.abs(self.expected_b_v)
